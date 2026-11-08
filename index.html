@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>NEON BREAKER - FIXED EDITION</title>
+  <title>NEON BREAKER - ANTI-LOOP EDITION</title>
   <style>
     * {
       box-sizing: border-box;
@@ -152,7 +152,6 @@ const ctx = canvas.getContext('2d');
 const CANVAS_WIDTH = 480;
 const CANVAS_HEIGHT = 640;
 
-const COLS = 16;
 const BLOCK_WIDTH = 26;
 const BLOCK_HEIGHT = 12;
 const BLOCK_PADDING = 2;
@@ -194,9 +193,7 @@ let scorePopups = [];
 
 let keys = { ArrowLeft: false, ArrowRight: false, Space: false };
 
-// MAP DATA (0:空, 1-4:通常, 9:スチール)
 const STAGE_MAPS = [
-  // Stage 1: 通路を開放し、内部のブロックに侵入しやすいバランスへ修正
   [
     [9,9,9,9,9,0,0,9,9,0,0,9,9,9,9,9],
     [9,1,1,1,9,0,0,9,9,0,0,9,3,3,3,9],
@@ -265,12 +262,13 @@ function resetPaddleAndBall() {
     y: paddle.y - 8,
     vx: (Math.random() > 0.5 ? 1 : -1) * 3,
     vy: -4,
-    radius: 4, // 通過しやすいように4pxにデバッグ修正
-    stuck: true
+    radius: 4,
+    stuck: true,
+    noBreakTimer: 0 // ループ検知用タイマー
   }];
 }
 
-// --- INPUT LISTENERS ---
+// --- INPUT HANDLERS ---
 window.addEventListener('keydown', (e) => {
   initAudio();
   if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.ArrowLeft = true;
@@ -300,7 +298,7 @@ canvas.addEventListener('touchmove', (e) => {
   clampPaddle();
 }, { passive: false });
 
-canvas.addEventListener('touchstart', (e) => {
+canvas.addEventListener('touchstart', () => {
   initAudio();
   handleSpaceAction();
 });
@@ -325,6 +323,33 @@ function handleSpaceAction() {
     lasers.push({ x: paddle.x + 8, y: paddle.y, w: 4, h: 12, speed: 10 });
     lasers.push({ x: paddle.x + paddle.w - 12, y: paddle.y, w: 4, h: 12, speed: 10 });
     playSound('laser');
+  }
+}
+
+// --- BALL PHYSICS & ANTI-LOOP ---
+function applyAntiLoopCorrection(b) {
+  let speed = Math.hypot(b.vx, b.vy);
+  let angle = Math.atan2(b.vy, b.vx);
+
+  // 1. 完全な水平・垂直の固定化を防止（特定角度付近での強制ずれ）
+  const threshold = 0.15; // 約 8.5度
+  if (Math.abs(b.vx) < threshold) b.vx = (b.vx < 0 ? -1 : 1) * (threshold + 0.1);
+  if (Math.abs(b.vy) < threshold) b.vy = (b.vy < 0 ? -1 : 1) * (threshold + 0.1);
+
+  // 2. 微小なランダムノイズの付加 (±0.05rad)
+  let noise = (Math.random() - 0.5) * 0.1;
+  angle += noise;
+
+  // 速度ベクトルの再調整
+  b.vx = speed * Math.cos(angle);
+  b.vy = speed * Math.sin(angle);
+
+  // 3. 長時間非破壊（ループ）検出時の強力インパルス
+  b.noBreakTimer++;
+  if (b.noBreakTimer > 240) { // 4秒以上破壊がない場合
+    b.vx += (Math.random() - 0.5) * 2;
+    b.vy += (Math.random() - 0.5) * 2;
+    b.noBreakTimer = 0;
   }
 }
 
@@ -354,10 +379,25 @@ function update() {
     b.x += b.vx * speedMult;
     b.y += b.vy * speedMult;
 
-    // 壁バウンド
-    if (b.x - b.radius < 0) { b.x = b.radius; b.vx *= -1; playSound('steel'); }
-    if (b.x + b.radius > CANVAS_WIDTH) { b.x = CANVAS_WIDTH - b.radius; b.vx *= -1; playSound('steel'); }
-    if (b.y - b.radius < 0) { b.y = b.radius; b.vy *= -1; playSound('steel'); }
+    // 壁バウンド（アンチループ適応）
+    if (b.x - b.radius < 0) {
+      b.x = b.radius;
+      b.vx *= -1;
+      applyAntiLoopCorrection(b);
+      playSound('steel');
+    }
+    if (b.x + b.radius > CANVAS_WIDTH) {
+      b.x = CANVAS_WIDTH - b.radius;
+      b.vx *= -1;
+      applyAntiLoopCorrection(b);
+      playSound('steel');
+    }
+    if (b.y - b.radius < 0) {
+      b.y = b.radius;
+      b.vy *= -1;
+      applyAntiLoopCorrection(b);
+      playSound('steel');
+    }
 
     // 落下
     if (b.y - b.radius > CANVAS_HEIGHT) {
@@ -378,6 +418,7 @@ function update() {
       b.vx = speed * Math.sin(angle);
       b.vy = -speed * Math.cos(angle);
       b.y = paddle.y - b.radius;
+      b.noBreakTimer = 0; // パドル接触でリセット
       playSound('paddle');
     }
 
@@ -386,18 +427,20 @@ function update() {
       const bk = blocks[j];
       if (checkBallBlockCollision(b, bk)) {
         if (bk.type === 9) {
-          // スチールブロックは貫通状態でも必ず反射
           playSound('steel');
           reflectBall(b, bk);
+          applyAntiLoopCorrection(b);
         } else {
           playSound('block');
           createParticles(bk.x + bk.w / 2, bk.y + bk.h / 2, bk.color);
           addScore(100, bk.x + bk.w / 2, bk.y);
+          b.noBreakTimer = 0; // ブロック破壊でタイマーリセット
 
           if (Math.random() < 0.25) spawnItem(bk.x + bk.w / 2, bk.y + bk.h / 2);
 
           if (paddle.timerPenet === 0) {
             reflectBall(b, bk);
+            applyAntiLoopCorrection(b);
           }
           blocks.splice(j, 1);
         }
@@ -496,8 +539,8 @@ function applyItem(type) {
     let currentCount = balls.length;
     for (let i = 0; i < currentCount; i++) {
       let src = balls[i];
-      balls.push({ x: src.x, y: src.y, vx: src.vx * 0.8 + (Math.random() - 0.5) * 4, vy: -Math.abs(src.vy), radius: 4, stuck: false });
-      balls.push({ x: src.x, y: src.y, vx: -src.vx * 0.8 + (Math.random() - 0.5) * 4, vy: -Math.abs(src.vy), radius: 4, stuck: false });
+      balls.push({ x: src.x, y: src.y, vx: src.vx * 0.8 + (Math.random() - 0.5) * 4, vy: -Math.abs(src.vy), radius: 4, stuck: false, noBreakTimer: 0 });
+      balls.push({ x: src.x, y: src.y, vx: -src.vx * 0.8 + (Math.random() - 0.5) * 4, vy: -Math.abs(src.vy), radius: 4, stuck: false, noBreakTimer: 0 });
     }
   }
   else if (type === ITEM_TYPES.SLOW) { paddle.timerSlow = 480; }
@@ -531,7 +574,6 @@ function createParticles(x, y, color, count = 6) {
 function render() {
   ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-  // ブロック描画
   blocks.forEach(bk => {
     ctx.fillStyle = bk.color;
     ctx.shadowColor = bk.color;
@@ -544,14 +586,12 @@ function render() {
   });
   ctx.shadowBlur = 0;
 
-  // パドル
   ctx.fillStyle = paddle.hasLaser ? '#ff3366' : (paddle.timerEnlarge > 0 ? '#00ffcc' : '#00f3ff');
   ctx.shadowColor = ctx.fillStyle;
   ctx.shadowBlur = 10;
   ctx.fillRect(paddle.x, paddle.y, paddle.w, paddle.h);
   ctx.shadowBlur = 0;
 
-  // ボール
   balls.forEach(b => {
     ctx.fillStyle = paddle.timerPenet > 0 ? '#ff3300' : '#ffffff';
     ctx.shadowColor = ctx.fillStyle;
@@ -562,11 +602,9 @@ function render() {
   });
   ctx.shadowBlur = 0;
 
-  // レーザー
   ctx.fillStyle = '#ff3366';
   lasers.forEach(l => ctx.fillRect(l.x, l.y, l.w, l.h));
 
-  // アイテム
   items.forEach(item => {
     ctx.fillStyle = item.type.color;
     ctx.fillRect(item.x, item.y, item.w, item.h);
@@ -576,14 +614,12 @@ function render() {
     ctx.fillText(item.type.code, item.x + item.w / 2, item.y + 9);
   });
 
-  // パーティクル & スコア
   particles.forEach(p => { ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, p.size, p.size); });
   ctx.font = 'bold 12px monospace';
   ctx.fillStyle = '#ffff00';
   ctx.textAlign = 'center';
   scorePopups.forEach(sp => ctx.fillText(sp.text, sp.x, sp.y));
 
-  // オーバーレイ
   if (gameState !== 'PLAYING') {
     ctx.fillStyle = 'rgba(5, 5, 8, 0.85)';
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
